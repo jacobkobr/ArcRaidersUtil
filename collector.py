@@ -3,9 +3,9 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse, unquote
 
-BASE_PAGE_URL = "https://arc-raiders.fandom.com/wiki/Items"
-BASE_SITE_URL = "https://arc-raiders.fandom.com"
-OUT_DIR = "arc_items"
+base_url = "https://arc-raiders.fandom.com/wiki/Items"
+base_site = "https://arc-raiders.fandom.com"
+destination = "arc_items"
 
 
 def find_items_table(soup: BeautifulSoup):
@@ -14,10 +14,8 @@ def find_items_table(soup: BeautifulSoup):
         header_row = table.find("tr")
         if not header_row:
             continue
-        header_text = " ".join(
-            cell.get_text(strip=True)
-            for cell in header_row.find_all(["th", "td"])
-        )
+        header_text = " ".join(cell.get_text(strip=True) 
+            for cell in header_row.find_all(["th", "td"]))
         if "Name" in header_text and "Rarity" in header_text:
             return table
     return None
@@ -42,7 +40,7 @@ def get_image_info_from_row(row):
 
     # Make URL absolute if it's relative
     if img_url.startswith("/"):
-        img_url = urljoin(BASE_SITE_URL, img_url)
+        img_url = urljoin(base_site, img_url)
 
     filename = None
     if img and img.get("data-image-name"):
@@ -58,10 +56,10 @@ def get_image_info_from_row(row):
 
 
 def main():
-    os.makedirs(OUT_DIR, exist_ok=True)
+    os.makedirs(destination, exist_ok=True)
 
-    print(f"Fetching page: {BASE_PAGE_URL}")
-    resp = requests.get(BASE_PAGE_URL, headers={"User-Agent": "Mozilla/5.0"})
+    print(f"Fetching page: {base_url}")
+    resp = requests.get(base_url, headers={"User-Agent": "Mozilla/5.0"})
     resp.raise_for_status()
 
     soup = BeautifulSoup(resp.text, "html.parser")
@@ -80,7 +78,7 @@ def main():
             print(f"[{i}] No image found, skipping.")
             continue
 
-        out_path = os.path.join(OUT_DIR, filename)
+        out_path = os.path.join(destination, filename)
         if os.path.exists(out_path):
             print(f"[{i}] {filename} already exists, skipping.")
             continue
