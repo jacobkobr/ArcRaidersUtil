@@ -1,166 +1,153 @@
-# analyze_inventory_cropped.py
+# analyze_inventory.py
+#
+# Match your inventory tiles to REAL wiki filenames from arc_items/
+# Output in Option A format:
+#
+# "Advanced_Fuse.png": {
+#     "stacks": [
+#         { "qty": 15, "pos": [0,1] },
+#         { "qty": 5,  "pos": [0,2] }
+#     ]
+# }
 
 import os
 import json
-from typing import Tuple, Dict, Any, List
-
-from PIL import Image
+from PIL import Image, ImageStat
 import imagehash
 import pytesseract
+
+WIKI_DB = "wiki_icon_db.json"       # built from wiki icons
+INVENTORY_IMAGE = "inventory.png"   # your cropped 6×4 stash screenshot
+OUTPUT = "inventory_counts.json"
+
+ROWS = 6
+COLS = 4
+PH_THRESH = 6
+DH_THRESH = 6
+WH_THRESH = 6
+
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
+# -----------------------
 
-HASH_DB_PATH = "arc_item_hashes.json"
-OUTPUT_JSON = "inventory_counts.json"
+def core_crop(tile: Image.Image) -> Image.Image:
+    w, h = tile.size
+    left   = int(w * 0.30)
+    top    = int(h * 0.25)
+    right  = int(w * 0.70)
+    bottom = int(h * 0.75)
+    core = tile.crop((left, top, right, bottom))
+    core = core.resize((64, 64), Image.LANCZOS)
+    return core.convert("L")
 
-# Just rows/cols now
-ROWS = 6   # update to your grid
-COLS = 4   # update to your grid
+def normalize_tile_for_hash(tile: Image.Image):
+    core = core_crop(tile)
+    return (
+        imagehash.phash(core),
+        imagehash.dhash(core),
+        imagehash.whash(core)
+    )
 
-
-def normalize_icon(img: Image.Image) -> Image.Image:
+def slice_grid(img: Image.Image):
     w, h = img.size
-    crop = img.crop((int(w * 0.1), int(h * 0.1), int(w * 0.9), int(h * 0.9)))
-    crop = crop.resize((64, 64), Image.LANCZOS)
-    crop = crop.convert("L")
-    return crop
-
-
-def normalize_for_hash(img: Image.Image):
-    norm = normalize_icon(img)
-    ph = imagehash.phash(norm)
-    dh = imagehash.dhash(norm)
-    return ph, dh
-
-
-def load_hash_db(path: str):
-    with open(path, "r", encoding="utf-8") as f:
-        db = json.load(f)
-
-    for entry in db:
-        entry["_phash"] = imagehash.hex_to_hash(entry["phash"])
-        entry["_dhash"] = imagehash.hex_to_hash(entry["dhash"])
-    return db
-
-
-def slice_inventory(img: Image.Image):
-    """
-    Whole image is the stash grid: just split into ROWS x COLS.
-    """
-    w, h = img.size
-    cell_w = w / COLS
-    cell_h = h / ROWS
-
     tiles = []
+    cw = w / COLS
+    ch = h / ROWS
     for r in range(ROWS):
         for c in range(COLS):
-            x0 = int(c * cell_w)
-            y0 = int(r * cell_h)
-            x1 = int((c + 1) * cell_w)
-            y1 = int((r + 1) * cell_h)
-            tile = img.crop((x0, y0, x1, y1))
-            tiles.append((r, c, tile))
+            x0, y0 = int(c*cw), int(r*ch)
+            x1, y1 = int((c+1)*cw), int((r+1)*ch)
+            tiles.append((r, c, img.crop((x0, y0, x1, y1))))
     return tiles
 
+def is_empty(tile):
+    gray = tile.convert("L")
+    stat = ImageStat.Stat(gray)
+    return stat.mean[0] < 25 and stat.var[0] < 35
 
-def best_match(tile_img, db):
-    tile_ph, tile_dh = normalize_for_hash(tile_img)
+def load_wiki_db():
+    with open(WIKI_DB, "r", encoding="utf-8") as f:
+        db = json.load(f)
+
+    for item in db:
+        item["_ph"] = imagehash.hex_to_hash(item["phash"])
+        item["_dh"] = imagehash.hex_to_hash(item["dhash"])
+        item["_wh"] = imagehash.hex_to_hash(item["whash"])
+
+    return db
+
+def match_to_wiki(tile_hashes, db):
+    ph, dh, wh = tile_hashes
+
     best = None
-    best_score = 999.0
+    best_sum = 999
 
-    for entry in db:
-        d1 = tile_ph - entry["_phash"]
-        d2 = tile_dh - entry["_dhash"]
-        score = (d1 + d2) / 2.0
-        if score < best_score:
-            best_score = score
-            best = entry
+    for item in db:
+        d1 = ph - item["_ph"]
+        d2 = dh - item["_dh"]
+        d3 = wh - item["_wh"]
+        s = d1 + d2 + d3
+        if s < best_sum:
+            best_sum = s
+            best = (item, (d1, d2, d3))
 
-    return best, best_score
+    (d1, d2, d3) = best[1]
+    if d1 <= PH_THRESH and d2 <= DH_THRESH and d3 <= WH_THRESH:
+        return best[0]["filename"]  # REAL wiki filename
+    return None
 
+def read_stack(tile):
+    w, h = tile.size
+    x0, y0 = int(w*0.55), int(h*0.78)
+    x1, y1 = int(w*0.97), int(h*0.98)
+    region = tile.crop((x0, y0, x1, y1)).convert("L")
+    bw = region.point(lambda p: 255 if p > 160 else 0)
 
-def read_stack_count(tile_img: Image.Image) -> int:
-    w, h = tile_img.size
-    count_region = tile_img.crop((0, int(h * 0.7), w, h))
-    gray = count_region.convert("L")
     text = pytesseract.image_to_string(
-        gray,
+        bw,
         config="--psm 7 -c tessedit_char_whitelist=0123456789"
     ).strip()
 
     digits = "".join(ch for ch in text if ch.isdigit())
-    if not digits:
-        return 1
-    try:
-        val = int(digits)
-        return max(val, 1)
-    except ValueError:
-        return 1
+    return int(digits) if digits else 1
 
-
-def is_mostly_empty(tile_img: Image.Image) -> bool:
-    gray = tile_img.convert("L")
-    hist = gray.histogram()
-    total = sum(hist)
-    if total == 0:
-        return True
-    dark_pixels = sum(hist[:3])
-    return dark_pixels / total > 0.95
-
-
-def analyze_inventory(screenshot_path: str, db):
-    img = Image.open(screenshot_path)
-    tiles = slice_inventory(img)
-
-    SAFE_THRESH = 4.0
-    MAYBE_THRESH = 8.0
-
-    counts: Dict[str, Dict[str, Any]] = {}
-
-    for (r, c, tile) in tiles:
-        if is_mostly_empty(tile):
-            continue
-
-        match, score = best_match(tile, db)
-        if match is None:
-            print(f"({r},{c}) no match")
-            continue
-
-        filename = match["filename"]
-        stack_size = read_stack_count(tile)
-
-        if filename not in counts:
-            counts[filename] = {"stacks": 0, "total_quantity": 0}
-
-        counts[filename]["stacks"] += 1
-        counts[filename]["total_quantity"] += stack_size
-
-        print(f"({r},{c}) -> {filename}, score={score:.1f}, stack={stack_size}")
-
-    return counts
-
-
-def save_counts(counts, out_path):
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(counts, f, indent=4)
-    print(f"\nSaved to {out_path}")
-
+# -----------------------
 
 def main():
-    db = load_hash_db(HASH_DB_PATH)
-    screenshot_path = "inventory.png"
+    db = load_wiki_db()
 
-    if not os.path.exists(screenshot_path):
-        print("Put a cropped stash screenshot as 'inventory.png' in this folder.")
-        return
+    img = Image.open(INVENTORY_IMAGE)
+    tiles = slice_grid(img)
 
-    counts = analyze_inventory(screenshot_path, db)
-    save_counts(counts, OUTPUT_JSON)
+    output = {}
 
-    print("\nSummary:")
-    for name, info in counts.items():
-        print(f"{name}: stacks={info['stacks']}, total={info['total_quantity']}")
+    for (r, c, tile) in tiles:
+        if is_empty(tile):
+            continue
 
+        hashes = normalize_tile_for_hash(tile)
+        wiki_name = match_to_wiki(hashes, db)
+
+        if wiki_name is None:
+            print(f"({r},{c}) = no match")
+            continue
+
+        qty = read_stack(tile)
+
+        if wiki_name not in output:
+            output[wiki_name] = {"stacks": []}
+
+        output[wiki_name]["stacks"].append({
+            "qty": qty,
+            "pos": [r, c]
+        })
+
+        print(f"({r},{c}) -> {wiki_name}, qty={qty}")
+
+    with open(OUTPUT, "w", encoding="utf-8") as f:
+        json.dump(output, f, indent=4)
+
+    print("\nSaved:", OUTPUT)
 
 if __name__ == "__main__":
     main()
